@@ -131,11 +131,27 @@ h2{font-size:17px;margin:0;font-weight:700}
 .wave i:nth-child(2n){animation-delay:.15s}.wave i:nth-child(3n){animation-delay:.3s}.wave i:nth-child(5n){animation-delay:.45s}
 @keyframes wv{0%,100%{height:4px}50%{height:14px}}
 .time{font:12px var(--m);color:var(--sub);text-align:center}
-/* 再生の速さ（7段・押した段がアクセント色） */
-.rates{display:flex;gap:6px}
-.rates .chip{flex:1;min-width:0;padding:0}
-.rates .chip[aria-pressed="true"]{background:var(--ac);color:var(--ac-ink);border-color:var(--ac);font-weight:800}
-.ratebox{background:var(--s2);border:1px solid var(--line);border-radius:14px;padding:10px}
+/* 再生の速さのバー（0.9〜2.0・0.1 刻み）。目盛りと今の値だけ大きく。開くときは右下のボタン側から短く広がる */
+.ratebox{background:var(--s2);border:1px solid var(--line);border-radius:16px;padding:12px 14px 10px;transform-origin:100% 100%;animation:rateIn .16s cubic-bezier(.2,.8,.2,1)}
+@keyframes rateIn{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+.rateui{--th:34px;display:flex;flex-direction:column;gap:6px}
+.rateval{display:flex;align-items:baseline;justify-content:center;gap:4px}
+.rateval b{font:800 30px/1.1 var(--m);color:var(--ac)}
+.rateval span{font-size:14px;color:var(--sub)}
+.rangewrap{position:relative;padding-top:6px}
+.rangewrap input.rate{-webkit-appearance:none;appearance:none;display:block;width:100%;height:48px;margin:0;background:transparent;touch-action:none;cursor:pointer}
+.rangewrap input.rate:focus-visible{outline:2px solid var(--ac);outline-offset:2px;border-radius:24px}
+.rangewrap input.rate::-webkit-slider-runnable-track{height:10px;border-radius:5px;background:linear-gradient(90deg,var(--ac) calc(var(--p)*100%),var(--line) 0)}
+.rangewrap input.rate::-moz-range-track{height:10px;border-radius:5px;background:var(--line)}
+.rangewrap input.rate::-moz-range-progress{height:10px;border-radius:5px;background:var(--ac)}
+.rangewrap input.rate::-webkit-slider-thumb{-webkit-appearance:none;width:var(--th);height:var(--th);margin-top:calc(5px - var(--th)/2);border-radius:50%;background:var(--ac);border:3px solid var(--t);box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.rangewrap input.rate::-moz-range-thumb{width:var(--th);height:var(--th);border-radius:50%;background:var(--ac);border:3px solid var(--t)}
+.ticks{display:flex;justify-content:space-between;padding:0 calc(var(--th)/2);font-size:12.5px;color:var(--sub);height:34px}
+.ticks span{width:0;display:flex;flex-direction:column;align-items:center;white-space:nowrap;transition:color .12s,font-size .12s}
+.ticks span.on{color:var(--ac);font-weight:800;font-size:15px}
+.ticks span.std::after{content:"入試";font:600 10px var(--f);color:var(--sub);margin-top:1px}
+.bubble{position:absolute;top:-30px;left:calc(var(--th)/2 + var(--p)*(100% - var(--th)));transform:translateX(-50%) scale(.6);opacity:0;pointer-events:none;background:var(--ac);color:var(--ac-ink);font-weight:800;font-size:20px;line-height:1;padding:7px 10px;border-radius:12px;transition:opacity .12s,transform .12s;transform-origin:50% 100%}
+.rateui.drag .bubble{opacity:1;transform:translateX(-50%) scale(1)}
 .decide{display:flex;gap:10px}
 .decide .btn{flex:1;min-height:56px;border-radius:28px;font-size:16px}
 .decide .sure{background:var(--ac);color:var(--ac-ink);border-color:var(--ac);font-weight:700}

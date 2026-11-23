@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "c95db63ecf";
+const APP_VER = "8c0da07f7c";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -28,9 +28,12 @@ const KINDS = [
   { key: "sz2", label: "スピーチ（記述）" },
 ];
 // 再生の速さ（既定は入試の放送より少し速い 1.1倍・初めてなら 0.9倍くらいから・本番も同じ既定）。
-// 段＝0.8〜1.3 は 0.1 ごと（0.9 と 1.1 を1回で選べる・0.8 は 0.9 でもきついときの一段下）＋1.5（全体設計 v3 §3 の上限＝それより上は合成音声が崩れる）。
-const RATES = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5];
+// 範囲＝0.9〜2.0倍・0.1 刻みの12段（同じ日の追加の依頼＝右下のボタンからバーで選ぶ・字面の「1.1〜2.0・0.2 刻み」は 0.9 と 2.0 が選べない＝選択肢で聞いた答え）。
+// 全体設計 v3 §3 の「上限 1.5（それより上は合成音声が崩れる）」より上も選べる＝選択肢の答え。1.6 倍以上の聞こえ方は実機で見る。
+const RATES = Array.from({ length: 12 }, (_, i) => Math.round((0.9 + i * 0.1) * 10) / 10);
 const RATE_DEFAULT = 1.1;
+// 今日の3問＝対話2＋スピーチ1（同じ日の追加の依頼・選択肢の答え）
+const TODAY_SZ1 = 2, TODAY_SZ2 = 1;
 // 画面の文（推敲した稿）
 const TXT = {
   rateNote: "はじめは入試の放送より少し速い 1.1倍にしてあります。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
@@ -310,7 +313,9 @@ function watchSeg() {
 }
 
 // ---------- 再生の速さ（端末に保存・次に開いても続く） ----------
-function curRate() { const r = +S.settings.rate; return RATES.includes(r) ? r : RATE_DEFAULT; }
+const snapRate = x => Math.min(RATES[RATES.length - 1], Math.max(RATES[0], Math.round(x * 10) / 10));
+// 前の版で選んだ 0.8 などは、いまの範囲の端へ寄せる（記録は壊さない）
+function curRate() { const r = +S.settings.rate; return isFinite(r) && r > 0 ? snapRate(r) : RATE_DEFAULT; }
 const fmtRate = r => r.toFixed(1);
 // 声が高くならないように preservesPitch（と webkit・moz の名前）を立てる。実機で声が高くならないかは【未実測】（実機の試験待ち）
 let rateFix = 0, rateFixT = null;
@@ -332,10 +337,32 @@ au.addEventListener("ratechange", () => {
   clearTimeout(rateFixT); rateFixT = setTimeout(() => { rateFix = 0; }, 1000);
   applyRate();
 });
+// 速さのバー（0.9〜2.0・0.1 刻み）。目盛りと今の値だけを大きく（つまみ 34px・今の値 30px・動かしている間は指の上に値の吹き出し）。
+// 目盛りの字はつまみの中心と同じ位置に並べる（左右の余白＝つまみの半分）。1.0 の下に「入試」の印。
+const rateP = r => (r - RATES[0]) / (RATES[RATES.length - 1] - RATES[0]);
 function vRatePanel() {
   const r = curRate();
-  return `<div class="stack" style="gap:8px"><div class="rates" role="group" aria-label="再生の速さ">${RATES.map(x => `<button class="chip num" data-act="setRate" data-r="${x}" aria-pressed="${x === r}">${fmtRate(x)}</button>`).join("")}</div>
+  return `<div class="rateui" style="--p:${rateP(r)}">
+    <div class="rateval num"><b class="rateNow">${fmtRate(r)}</b><span>倍</span></div>
+    <div class="rangewrap"><span class="bubble num" aria-hidden="true">${fmtRate(r)}</span>
+      <input type="range" class="rate" data-rate min="${RATES[0]}" max="${RATES[RATES.length - 1]}" step="0.1" value="${r}" aria-label="再生の速さ" aria-valuetext="${fmtRate(r)}倍">
+      <div class="ticks num" aria-hidden="true">${RATES.map(x => `<span class="${x === r ? "on" : ""}${x === 1 ? " std" : ""}" data-r="${x}">${fmtRate(x)}</span>`).join("")}</div></div>
     <p class="small" style="margin:0">${esc(TXT.rateNote)}</p></div>`;
+}
+// バーを動かしている間＝描き直さずに、その場で値・目盛り・右下のボタンを塗り替え、鳴っている音にもすぐ効かせる
+function onRateInput(el, done) {
+  const r = snapRate(+el.value);
+  S.settings.rate = r; rateFix = 0; applyRate();
+  const ui = el.closest(".rateui");
+  if (ui) {
+    ui.style.setProperty("--p", rateP(r));
+    ui.querySelectorAll(".rateNow, .bubble").forEach(x => { x.textContent = fmtRate(r); });
+    ui.querySelectorAll(".ticks span").forEach(x => x.classList.toggle("on", +x.dataset.r === r));
+    ui.classList.toggle("drag", !done);
+  }
+  el.setAttribute("aria-valuetext", fmtRate(r) + "倍");
+  document.querySelectorAll('[data-act="rate"]').forEach(b => { b.textContent = fmtRate(r) + "x"; });
+  if (done) { save(true); if (V.name === "examIntro") render(); } else save();
 }
 au.addEventListener("timeupdate", () => {
   if (pending && pending.to != null && au.currentTime >= pending.to) { au.pause(); finish(true); }
@@ -406,20 +433,28 @@ function go(v) {
   V = v; window.scrollTo(0, 0); render();
 }
 
-// 今日の5問＝sz1 4問（期限が来た苦手→まだ解いていない→いちばん前に解いた）＋sz2 1セット
+// 今日の3問＝sz1 2問（期限が来た苦手→まだ解いていない→いちばん前に解いた）＋sz2 1セット
 function pickToday() {
-  if (S.today && S.today.date === ymd() && S.today.ids.every(id => ITEMS[id])) return S.today;
+  const t = S.today;
+  const isSz1 = id => ITEMS[id].type === "sz1-pick";
+  if (t && t.date === ymd() && Array.isArray(t.ids) && t.ids.every(id => ITEMS[id])) {
+    const n1 = t.ids.filter(isSz1).length;
+    if (n1 === TODAY_SZ1 && t.ids.length - n1 === TODAY_SZ2) return t;
+  }
   const sz1 = PACK.items.filter(i => i.type === "sz1-pick").map(i => i.id);
   const sz2 = PACK.items.filter(i => i.type === "sz2-fill").map(i => i.id);
-  const choose = (pool, n) => {
+  // 前の形（今日の5問）の途中の記録が今日の分に残っていたら、済んだ問題を先に残して3問に数え直す（解いた記録・苦手の箱はそのまま）
+  const done = t && t.date === ymd() && Array.isArray(t.ids) && Array.isArray(t.done) ? t.done.filter(id => ITEMS[id] && t.ids.includes(id)) : [];
+  const choose = (pool, n, keep) => {
     const due = pool.filter(isDue).sort((a, b) => S.rec[a].box.due.localeCompare(S.rec[b].box.due));
     const fresh = mixKinds(pool.filter(id => !S.rec[id]));
     const old = pool.filter(id => S.rec[id] && !isDue(id)).sort((a, b) => S.rec[a].last - S.rec[b].last);
-    const out = [];
-    for (const id of [...due, ...fresh, ...old]) { if (!out.includes(id)) out.push(id); if (out.length >= n) break; }
+    const out = keep.slice(0, n);
+    for (const id of [...due, ...fresh, ...old]) { if (out.length >= n) break; if (!out.includes(id) && !done.includes(id)) out.push(id); }
     return out;
   };
-  S.today = { date: ymd(), ids: [...choose(sz1, 4), ...choose(sz2, 1)], done: [] };
+  const ids = [...choose(sz1, TODAY_SZ1, done.filter(isSz1)), ...choose(sz2, TODAY_SZ2, done.filter(id => !isSz1(id)))];
+  S.today = { date: ymd(), ids, done: done.filter(id => ids.includes(id)) };
   save();
   return S.today;
 }
@@ -507,7 +542,7 @@ function vHome() {
     <div class="today">
       <div class="lab">TODAY</div>
       <div class="row"><span class="bignum">${t.ids.length - left.length}<span class="sub" style="font-size:20px"> / ${t.ids.length}</span></span><span class="gap"></span>
-        <span class="sub">${dueN ? `復習 ${dueN}問を含む` : "対話 4問＋スピーチ 1セット"}</span></div>
+        <span class="sub">${dueN ? `復習 ${dueN}問を含む` : "対話 2問＋スピーチ 1セット"}</span></div>
       <button class="btn pri big" data-act="today">${left.length ? (left.length === t.ids.length ? "はじめる" : "つづける") : "もう1回（別の問題）"}</button>
     </div>
     <div class="stats">
@@ -1237,7 +1272,7 @@ const ACT = {
     let t = pickToday();
     let left = t.ids.filter(id => !t.done.includes(id));
     if (!left.length) { S.today = null; t = pickToday(); left = t.ids; }
-    startSession(left, "today", "今日の5問");
+    startSession(left, "today", "今日の3問");
   },
   box() {
     const ids = Object.keys(S.rec).filter(id => ITEMS[id] && inBox(id)).sort((a, b) => S.rec[a].box.due.localeCompare(S.rec[b].box.due)).slice(0, 5);
@@ -1415,6 +1450,8 @@ const ACT = {
 let unlocked = false;
 document.addEventListener("click", () => { if (!unlocked && !pending) { unlocked = true; unlockAudio(); } }, true);
 document.addEventListener("click", e => {
+  // 速さのバーは、右下のボタンをもう一度押すか、バーの外を押すと閉じる（外を押した操作はそのまま効かせる）
+  if (rateOpen && !e.target.closest('.ratebox, [data-act="rate"]')) { rateOpen = false; mountPlayer(vPlayer()); paintPlayer(); }
   const tab = e.target.closest("[data-tab]");
   if (tab) { TAB = tab.dataset.tab; stopAudio(); go({ name: TAB }); return; }
   const el = e.target.closest("[data-act]");
@@ -1425,8 +1462,10 @@ document.addEventListener("click", e => {
 document.addEventListener("change", e => {
   const el = e.target;
   if (el.matches('input[type="checkbox"][data-act]')) ACT[el.dataset.act](el.dataset, el);
+  if (el.matches("input[data-rate]")) onRateInput(el, true);
 });
 document.addEventListener("input", e => {
+  if (e.target.matches && e.target.matches("input[data-rate]")) { onRateInput(e.target, false); return; }
   const el = e.target.closest("[data-in]"); if (!el) return;
   const st = V.name === "exam" ? V.st[V.e.sz2] : V.st;
   if (st) st.inputs[el.dataset.in] = el.value;
