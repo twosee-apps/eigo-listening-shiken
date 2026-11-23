@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "ea11693e61";
+const APP_VER = "d59d360ab4";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -27,11 +27,13 @@ const KINDS = [
   { key: "カレンダー", label: "カレンダー" },
   { key: "sz2", label: "スピーチ（記述）" },
 ];
-// 再生の速さ（既定は入試の放送より少し速い 1.1倍・初めてなら 0.9倍くらいから・本番も同じ既定）。
+// 再生の速さ（既定は入試の放送〈1.0倍〉より速い 1.3倍＝11/23 夕の依頼で 1.1倍から上げた・初めてなら 0.9倍くらいから・本番も同じ既定）。
+// 既定は端末に書かない（S.settings.rate は利用者が選んだときだけ・rateMine の印つき）＝次に既定を変えても、選んでいない人には新しい既定が効く。
+// 前の版は既定の 1.1 を書いていた＝印の無い 1.1 は「選んでいない」とみなして読み込みで外す（印の無い 1.1 以外の値は選んだ値として残す）。
 // 範囲＝0.9〜2.0倍・0.1 刻みの12段（同じ日の追加の依頼＝右下のボタンからバーで選ぶ・字面の「1.1〜2.0・0.2 刻み」は 0.9 と 2.0 が選べない＝選択肢で聞いた答え）。
 // 全体設計 v3 §3 の「上限 1.5（それより上は合成音声が崩れる）」より上も選べる＝選択肢の答え。1.6 倍以上の聞こえ方は実機で見る。
 const RATES = Array.from({ length: 12 }, (_, i) => Math.round((0.9 + i * 0.1) * 10) / 10);
-const RATE_DEFAULT = 1.1;
+const RATE_DEFAULT = 1.3;
 // 今日の3問＝対話2＋スピーチ1（同じ日の追加の依頼・選択肢の答え）
 const TODAY_SZ1 = 2, TODAY_SZ2 = 1;
 // ご意見・不具合の報告（アプリの中から受け口＝Google Apps Script のウェブアプリへ送る）。
@@ -43,7 +45,7 @@ const FB_KINDS_SET = ["使い方が分からない", "動かない・おかし�
 const FB_MAX = 200;
 // 画面の文（推敲した稿）
 const TXT = {
-  rateNote: "はじめは入試の放送より少し速い 1.1倍にしてあります。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
+  rateNote: "速さを変えていないときは、入試の放送（1.0倍）より速い 1.3倍で流れます。いまの聞き取りの力に合わせて、速さを調整してください。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
   flowNote: "登録したスピーチを順番に流し、最後まで行ったら最初に戻ります（止めるまで続きます）。くり返しても次のスピーチに替わっても、速さは選んだままです。画面を消しても流れ続けるかは、スマホによって違います。",
   shadowNote: "英文を1つ流したあと、同じ長さだけ音が止まります。その間に、聞いたとおりにまねして言ってください。最後の文まで行くと、最初からくり返します。流すのは、解いて台本を確かめた問題だけです。",
   shadowEmpty: "まだ解いた問題がありません。練習で問題を解くと、ここに出ます。",
@@ -95,7 +97,9 @@ function beep() {
 function vibe(ms = 12) { try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} }
 
 // ---------- 記録（端末の localStorage） ----------
-function blank() { return { v: 1, settings: { accent: 0, rate: RATE_DEFAULT }, rec: {}, flow: [], listen: {}, reports: [], today: null, pack: null }; }
+function blank() { return { v: 1, settings: { accent: 0 }, rec: {}, flow: [], listen: {}, reports: [], today: null, pack: null }; }
+// 前の版が書いた既定の 1.1（rateMine の印が無い）＝選んでいない＝外して今の既定に（上の RATE_DEFAULT の注）。読み込みと記録の取り込みの両方で
+function fixOldRate(st) { if (st && typeof st === "object" && !st.rateMine && +st.rate === 1.1) delete st.rate; }
 let S = (() => {
   try {
     const x = JSON.parse(localStorage.getItem(KEY) || "null");
@@ -103,6 +107,7 @@ let S = (() => {
       const s = Object.assign(blank(), x), b = blank();
       for (const k of ["settings", "rec", "listen"]) if (!s[k] || typeof s[k] !== "object" || Array.isArray(s[k])) s[k] = b[k];
       for (const k of ["flow", "reports"]) if (!Array.isArray(s[k])) s[k] = b[k];
+      fixOldRate(s.settings);
       s.reports = fbFixAll(s.reports);
       return s;
     }
@@ -429,7 +434,7 @@ function vRatePanel() {
 // バーを動かしている間＝描き直さずに、その場で値・目盛り・右下のボタンを塗り替え、鳴っている音にもすぐ効かせる
 function onRateInput(el, done) {
   const r = snapRate(+el.value);
-  S.settings.rate = r; rateFix = 0; applyRate();
+  S.settings.rate = r; S.settings.rateMine = true; rateFix = 0; applyRate();
   const ui = el.closest(".rateui");
   if (ui) {
     ui.style.setProperty("--p", rateP(r));
@@ -1427,7 +1432,7 @@ const ACT = {
   // 速さを選ぶ＝端末に保存（次に開いても続く）・鳴っている音にもすぐ効かせる
   setRate(d) {
     const r = +d.r; if (!RATES.includes(r)) return;
-    S.settings.rate = r; save(true); rateFix = 0; applyRate();
+    S.settings.rate = r; S.settings.rateMine = true; save(true); rateFix = 0; applyRate();
     if (hasPlayer()) { mountPlayer(vPlayer()); paintPlayer(); } else render();
   },
   flowStart() {
@@ -1580,6 +1585,7 @@ const ACT = {
     if (!obj(x.rec) || bad.length) { toast("記録が壊れています（" + (bad.join("・") || "rec") + "）"); return; }
     if (Object.values(x.rec).some(r => !obj(r) || !Array.isArray(r.hist))) { toast("記録が壊れています（rec の中身）"); return; }
     if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "もう一度押すと入れ替えます"; return; }
+    fixOldRate(x.settings);   // 前の版で書き出した既定の 1.1 は「選んでいない」＝いまの速さを残す
     Object.assign(S, { settings: Object.assign(S.settings, x.settings || {}), rec: x.rec || {}, flow: x.flow || [], listen: x.listen || {}, reports: fbFixAll(x.reports), exams: x.exams || {}, today: null });
     save(true); toast("読み込みました"); render();
   },
