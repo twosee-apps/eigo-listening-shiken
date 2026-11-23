@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "8c0da07f7c";
+const APP_VER = "8c33caac0e";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];

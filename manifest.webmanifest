@@ -1,6 +1,6 @@
 {
-  "name": "英語リスニング（静岡 大問1）",
-  "short_name": "リスニング",
+  "name": "SL-JHS",
+  "short_name": "SL-JHS",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
