@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "399d35f162";
+const APP_VER = "ea11693e61";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -53,6 +53,7 @@ const TXT = {
   fbNote: "名前・学校・連絡先は書かないでください。返事はできません。",
   fbWhatQ: "送るのは、種類・書いた文・問題の番号・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
   fbWhatSet: "送るのは、種類・書いた文・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
+  fbCost: "送るときはインターネットを使うので、通信料がかかることがあります。",
   fbAudio: "先に、消音（マナーモード）になっていないか、音量が小さすぎないかを確かめてください。",
   fbPhQ: "どこがおかしいか（書かなくてもかまいません）",
   fbPhSet: "くわしい内容（書かなくてもかまいません）",
@@ -1033,7 +1034,7 @@ function vFbForm(f, kinds) {
     <div class="fbk" role="group" aria-label="種類">${kinds.map((k, i) => `<button class="fbc" data-act="fbKind" data-k="${i}" aria-pressed="${f.kind === k}">${esc(k)}</button>`).join("")}</div>
     ${f.kind === "音声がおかしい" ? `<p class="small fbwarn" style="margin:0">${esc(TXT.fbAudio)}</p>` : ""}
     <textarea id="fbTxt" maxlength="${FB_MAX}" placeholder="${esc(inSet ? TXT.fbPhSet : TXT.fbPhQ)}">${esc(f.text)}</textarea>
-    <p class="small" style="margin:0">${esc(TXT.fbNote)}${FEEDBACK_URL ? "<br>" + esc(inSet ? TXT.fbWhatSet : TXT.fbWhatQ) : ""}</p>
+    <p class="small" style="margin:0">${esc(TXT.fbNote)}${FEEDBACK_URL ? "<br>" + esc(inSet ? TXT.fbWhatSet : TXT.fbWhatQ) + "<br>" + esc(TXT.fbCost) : ""}</p>
     <div class="row">${FEEDBACK_URL ? `<button class="btn sm pri" data-act="fbGo">送る</button>` : ""}<button class="btn sm${FEEDBACK_URL ? "" : " pri"}" data-act="fbSave">端末に残す</button><button class="btn sm ghost" data-act="${inSet ? "fbOpen" : "report"}">閉じる</button></div>
   </div>`;
 }

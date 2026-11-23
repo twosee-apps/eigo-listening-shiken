@@ -4,7 +4,7 @@
 // - 保存した音声に Range 要求が来たら、保存した全体から切り出して 206 で返す（iPhone の Safari 対策）。
 //   ふだんの再生はアプリが保存から Blob を作って流す（app.js の audioUrl）。206 はその手前の受け皿。
 // - packs/index.json だけはネットを先に見る（新しい版に気づくため）。つながらなければ保存から。
-const SHELL = "eigo-shell-399d35f162";
+const SHELL = "eigo-shell-ea11693e61";
 const SHELL_FILES = ["./", "index.html", "app.css", "app.js", "manifest.webmanifest", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {
