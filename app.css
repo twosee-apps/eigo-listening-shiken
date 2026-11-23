@@ -131,6 +131,11 @@ h2{font-size:17px;margin:0;font-weight:700}
 .wave i:nth-child(2n){animation-delay:.15s}.wave i:nth-child(3n){animation-delay:.3s}.wave i:nth-child(5n){animation-delay:.45s}
 @keyframes wv{0%,100%{height:4px}50%{height:14px}}
 .time{font:12px var(--m);color:var(--sub);text-align:center}
+/* 再生の速さ（7段・押した段がアクセント色） */
+.rates{display:flex;gap:6px}
+.rates .chip{flex:1;min-width:0;padding:0}
+.rates .chip[aria-pressed="true"]{background:var(--ac);color:var(--ac-ink);border-color:var(--ac);font-weight:800}
+.ratebox{background:var(--s2);border:1px solid var(--line);border-radius:14px;padding:10px}
 .decide{display:flex;gap:10px}
 .decide .btn{flex:1;min-height:56px;border-radius:28px;font-size:16px}
 .decide .sure{background:var(--ac);color:var(--ac-ink);border-color:var(--ac);font-weight:700}
@@ -145,6 +150,9 @@ h2{font-size:17px;margin:0;font-weight:700}
 .ln.now{background:var(--s2)}
 .ln.now .w{color:var(--ac)}
 .ln.q{color:var(--sub)}
+.ln.past{color:var(--sub);opacity:.6}
+.lyrics .ln{font-size:18px}
+.textlist .rbtn{width:100%;background:none;border:0;border-bottom:1px solid var(--line);text-align:left;min-height:44px}
 .ja{font-size:15px;line-height:1.75}
 .small{font-size:12.5px;color:var(--sub);line-height:1.6}
 .textlist{display:flex;flex-direction:column;gap:6px}

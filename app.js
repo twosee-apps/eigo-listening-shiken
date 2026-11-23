@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "b5cbef544e";
+const APP_VER = "c95db63ecf";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -27,6 +27,20 @@ const KINDS = [
   { key: "カレンダー", label: "カレンダー" },
   { key: "sz2", label: "スピーチ（記述）" },
 ];
+// 再生の速さ（既定は入試の放送より少し速い 1.1倍・初めてなら 0.9倍くらいから・本番も同じ既定）。
+// 段＝0.8〜1.3 は 0.1 ごと（0.9 と 1.1 を1回で選べる・0.8 は 0.9 でもきついときの一段下）＋1.5（全体設計 v3 §3 の上限＝それより上は合成音声が崩れる）。
+const RATES = [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.5];
+const RATE_DEFAULT = 1.1;
+// 画面の文（推敲した稿）
+const TXT = {
+  rateNote: "はじめは入試の放送より少し速い 1.1倍にしてあります。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
+  flowNote: "登録したスピーチを順番に流し、最後まで行ったら最初に戻ります（止めるまで続きます）。くり返しても次のスピーチに替わっても、速さは選んだままです。画面を消しても流れ続けるかは、スマホによって違います。",
+  shadowNote: "英文を1つ流したあと、同じ長さだけ音が止まります。その間に、聞いたとおりにまねして言ってください。最後の文まで行くと、最初からくり返します。流すのは、解いて台本を確かめた問題だけです。",
+  shadowEmpty: "まだ解いた問題がありません。練習で問題を解くと、ここに出ます。",
+  approx: "この問題は音声から文の区切りを見つけられなかったので、区切る位置は目安です。",
+  examRate: r => `選んだ速さのまま、途中で変えずに最後まで進みます（いまは ${r}倍）。入試の放送は 1.0倍です。点数は速さに関係なく本番の記録として残します。`,
+  examEndRate: r => `速さ ${r}倍のまま最後まで解きました（入試の放送は 1.0倍）。`,
+};
 
 // ---------- 小さな道具 ----------
 const $ = s => document.querySelector(s);
@@ -54,7 +68,7 @@ function beep() {
 function vibe(ms = 12) { try { navigator.vibrate && navigator.vibrate(ms); } catch (_) {} }
 
 // ---------- 記録（端末の localStorage） ----------
-function blank() { return { v: 1, settings: { accent: 0 }, rec: {}, flow: [], listen: {}, reports: [], today: null, pack: null }; }
+function blank() { return { v: 1, settings: { accent: 0, rate: RATE_DEFAULT }, rec: {}, flow: [], listen: {}, reports: [], today: null, pack: null }; }
 let S = (() => {
   try {
     const x = JSON.parse(localStorage.getItem(KEY) || "null");
@@ -223,7 +237,9 @@ async function savePack() {
 }
 // 問題・本番の途中に保存が終わったら、新しいパックへの切り替えは問題の外に出たときに（開いている問題が新しい版で消えていても落ちない）
 let deferredPack = null;
-const inQuestion = () => ["q", "exam", "examEnd"].includes(V.name);
+const inQuestion = () => ["q", "exam", "examEnd", "flowPlay", "shadow"].includes(V.name);
+const isLoopView = () => V.name === "flowPlay" || V.name === "shadow";
+const hasPlayer = () => ["q", "exam", "flowPlay", "shadow"].includes(V.name);
 function usePack(p) { if (inQuestion()) deferredPack = p; else setPack(p); }
 function paintSaving() {
   const b = document.getElementById("saveBar"), t = document.getElementById("saveTxt");
@@ -233,7 +249,7 @@ function paintSaving() {
 
 // ---------- 再生（audio 要素は1つ・保存した音声は Blob で流す） ----------
 const au = $("#au");
-let curFile = null, curUrl = null, pending = null, playTok = 0;
+let curFile = null, curUrl = null, pending = null, playTok = 0, srcAt = 0;
 async function audioUrl(file) {
   const u = abs(`packs/${PACK_ID}/${file}`);
   if (S.pack && "caches" in window) {
@@ -262,15 +278,15 @@ async function playFile(file, from = 0, to = null) {
     const url = await audioUrl(file);
     if (tok !== playTok) { if (url.startsWith("blob:")) URL.revokeObjectURL(url); return false; }
     if (curUrl && curUrl.startsWith("blob:")) URL.revokeObjectURL(curUrl);
-    curUrl = url; curFile = file; au.src = url;
+    curUrl = url; curFile = file; au.src = url; srcAt = performance.now();
     if (from > 0) { await whenMeta(); if (tok !== playTok) return false; }
   }
-  au.defaultPlaybackRate = 1; au.playbackRate = 1;   // 速さの変更は実機の試験のあと。src を替えると戻る端末がある＝毎回入れる
-  au.preservesPitch = true; au.webkitPreservesPitch = true;
+  applyRate();   // src を替えると 1.0 に戻る端末がある＝鳴らすたびに入れ直す（loadedmetadata・play・ratechange でも）
   try { au.currentTime = from; } catch (_) {}
   lastSeg = to != null;
   return new Promise(res => {
     pending = { res, to, tok };
+    if (to != null) watchSeg();
     const pr = au.play();
     // AbortError＝読み込み中に一時停止した（pause() が play() を打ち切った）＝失敗に数えない。約束は残し、▶ で続きから
     if (pr && pr.catch) pr.catch(err => { if (err && err.name === "AbortError") return; if (pending && pending.tok === tok) { failPlay(); } });
@@ -282,7 +298,45 @@ function failPlay(msg) {
   curFile = null; unlocked = false;
   finish(false);
 }
-function stopAudio() { playTok++; au.pause(); finish(false); }
+function stopAudio() { playTok++; loopTok++; au.pause(); finish(false); }
+// 区間の終わり（文のタップ・シャドーイング）は timeupdate（約 0.25 秒ごと）だけだと次の文の頭まで鳴る＝鳴っている間は 40ms ごとに見る
+let segTimer = null;
+function watchSeg() {
+  clearInterval(segTimer);
+  segTimer = setInterval(() => {
+    if (!pending || pending.to == null) { clearInterval(segTimer); segTimer = null; return; }
+    if (au.currentTime >= pending.to) { au.pause(); finish(true); }
+  }, 40);
+}
+
+// ---------- 再生の速さ（端末に保存・次に開いても続く） ----------
+function curRate() { const r = +S.settings.rate; return RATES.includes(r) ? r : RATE_DEFAULT; }
+const fmtRate = r => r.toFixed(1);
+// 声が高くならないように preservesPitch（と webkit・moz の名前）を立てる。実機で声が高くならないかは【未実測】（実機の試験待ち）
+let rateFix = 0, rateFixT = null;
+function applyRate() {
+  const r = curRate();
+  try { au.preservesPitch = true; au.webkitPreservesPitch = true; au.mozPreservesPitch = true; } catch (_) {}
+  try {
+    if (Math.abs(au.defaultPlaybackRate - r) > 0.001) au.defaultPlaybackRate = r;
+    if (Math.abs(au.playbackRate - r) > 0.001) au.playbackRate = r;
+  } catch (_) {}
+}
+au.addEventListener("loadedmetadata", applyRate);
+au.addEventListener("play", applyRate);
+// 端末が勝手に戻したら入れ直す（入れられない値で入れ直しが続かないよう、1秒に3回まで）
+au.addEventListener("ratechange", () => {
+  const r = curRate();
+  if (Math.abs(au.playbackRate - r) < 0.001 && Math.abs(au.defaultPlaybackRate - r) < 0.001) return;
+  if (++rateFix > 3) return;
+  clearTimeout(rateFixT); rateFixT = setTimeout(() => { rateFix = 0; }, 1000);
+  applyRate();
+});
+function vRatePanel() {
+  const r = curRate();
+  return `<div class="stack" style="gap:8px"><div class="rates" role="group" aria-label="再生の速さ">${RATES.map(x => `<button class="chip num" data-act="setRate" data-r="${x}" aria-pressed="${x === r}">${fmtRate(x)}</button>`).join("")}</div>
+    <p class="small" style="margin:0">${esc(TXT.rateNote)}</p></div>`;
+}
 au.addEventListener("timeupdate", () => {
   if (pending && pending.to != null && au.currentTime >= pending.to) { au.pause(); finish(true); }
   addListen(); paintPlayer();
@@ -308,7 +362,7 @@ function unlockAudio() {
     playTok++; finish(false);
     if (curUrl && curUrl.startsWith("blob:")) URL.revokeObjectURL(curUrl);
     curUrl = null; curFile = null;
-    au.src = SILENT;
+    au.src = SILENT; srcAt = performance.now();
     const p = au.play(); if (p && p.catch) p.catch(() => {});
   } catch (_) {}
 }
@@ -319,6 +373,12 @@ au.addEventListener("pause", () => {
   if (V.name === "exam" && pending && !V.paused && !au.ended && !(pending.to != null && au.currentTime >= pending.to)) {
     V.paused = true;
     cue("止まりました。▶ で続けます");
+    mountPlayer(vPlayer());
+  }
+  // 流し聞き・シャドーイングも同じ（外から止まったら ▶ を出す・▶ やロック画面の再生で続きから）
+  // src を替えた直後の pause（替える前の音の分が遅れて届く）は外からの停止に数えない
+  if (isLoopView() && pending && !V.paused && !au.ended && performance.now() - srcAt > 400 && !(pending.to != null && au.currentTime >= pending.to)) {
+    V.paused = true;
     mountPlayer(vPlayer());
   }
   paintPlayer();
@@ -332,15 +392,17 @@ async function keepAwake(on) {
     if (!on && wake) { await wake.release(); wake = null; }
   } catch (_) { wake = null; }
 }
-document.addEventListener("visibilitychange", () => { if (!document.hidden && (V.name === "q" || V.name === "exam")) keepAwake(true); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && (V.name === "q" || V.name === "exam" || V.name === "shadow")) keepAwake(true); });
 
 // ---------- 画面の状態 ----------
 let V = { name: "home" };
 let TAB = "home";
+let rateOpen = false;   // 下のプレイヤーの速さの箱を開いているか
 let reloadPending = false;   // 新しい版の画面が届いた（問題・本番の途中だった）＝問題の外に出たら読み込み直す
 function go(v) {
-  if (reloadPending && !["q", "exam", "examEnd", "end"].includes(v.name)) { location.reload(); return; }
-  if (deferredPack && !["q", "exam", "examEnd"].includes(v.name)) { setPack(deferredPack); deferredPack = null; }
+  if (reloadPending && !["q", "exam", "examEnd", "end", "flowPlay", "shadow"].includes(v.name)) { location.reload(); return; }
+  if (deferredPack && !["q", "exam", "examEnd", "flowPlay", "shadow"].includes(v.name)) { setPack(deferredPack); deferredPack = null; }
+  rateOpen = false;
   V = v; window.scrollTo(0, 0); render();
 }
 
@@ -400,14 +462,14 @@ function render() {
   applyAccent();
   const app = $("#app");
   const tabs = $("#tabs");
-  const inQ = V.name === "q" || V.name === "exam";
+  const inQ = hasPlayer();
   // 本番の結果画面でもタブを隠す＝タブで抜けて本番の成績が記録されずに消える道を塞ぐ
   const noTabs = inQ || V.name === "examEnd";
   tabs.classList.toggle("hide", noTabs);
   app.classList.toggle("noTab", noTabs);
   for (const b of tabs.querySelectorAll("button")) b.classList.toggle("on", b.dataset.tab === TAB);
   if (!PACK) { app.innerHTML = `<div class="stack"><div class="lab">LOADING</div><h1>読み込み中</h1><p class="sub" id="loadErr"></p></div>`; mountPlayer(""); return; }
-  const html = { home: vHome, practice: vPractice, flow: vFlow, settings: vSettings, q: vQ, end: vEnd, examIntro: vExamIntro, exam: vExam, examEnd: vExamEnd }[V.name]();
+  const html = { home: vHome, practice: vPractice, flow: vFlow, settings: vSettings, q: vQ, end: vEnd, examIntro: vExamIntro, exam: vExam, examEnd: vExamEnd, flowPlay: vFlowPlay, shadow: vShadow }[V.name]();
   app.innerHTML = html;
   mountPlayer(inQ ? vPlayer() : "");
   paintPlayer(); paintSaving();
@@ -477,17 +539,173 @@ function vFlow() {
   const reg = (S.flow || []).filter(id => ITEMS[id]);
   const recent = reg.filter(id => S.rec[id] && S.rec[id].last >= wk);
   const list = recent.length ? recent : reg;
+  // シャドーイングに出すのは解いた問題だけ（解いたら台本と解説が出る＝台本を確かめた）。新しく解いた順
+  const solved = type => Object.keys(S.rec).filter(id => ITEMS[id] && ITEMS[id].type === type).sort((a, b) => S.rec[b].last - S.rec[a].last);
+  const sp = solved("sz2-fill"), dl = solved("sz1-pick");
+  const row = (id, who) => `<button class="r rbtn" data-act="shadow" data-id="${esc(id)}"><span>${esc(id)}・${esc(who)}</span><span class="sub">${ymd(new Date(S.rec[id].last)).slice(5)}　›</span></button>`;
   return `<div class="stack">
     <div><div class="lab">LISTEN AGAIN</div><h1>流し聞き</h1></div>
-    <div class="notice"><b>準備中</b><br><span class="sub">流し聞き・シャドーイング・再生の速さは、スマホで「画面を消しても続けて鳴るか」「速さを変えても声が高くならないか」を確かめてから使えるようにします。</span></div>
     <div class="card stack">
       <h2>聞き方の順番</h2>
       <p class="ja" style="margin:0">意味の分からない英語を流すだけでは、聞く力はあまり伸びません。<b>解く → 台本で確かめる → 音に重ねて読む（オーバーラッピング）→ 少し遅れて追いかけて言う（シャドーイング）</b>の順が効きます。ここで流すのは、解いて台本を確かめたスピーチだけです。</p>
     </div>
-    <h2>登録したスピーチ ${list.length}本</h2>
-    ${list.length ? `<div class="textlist">${list.map(id => `<div class="r"><span>${esc(id)}・${esc(ITEMS[id].speaker.name)}</span><span class="sub">${S.rec[id] ? ymd(new Date(S.rec[id].last)).slice(5) : ""}</span></div>`).join("")}</div>`
+    <div class="card stack"><h2>再生の速さ</h2>${vRatePanel()}</div>
+    <h2>流し聞き（登録したスピーチ ${list.length}本）</h2>
+    <p class="sub" style="margin:0">${esc(TXT.flowNote)}</p>
+    ${list.length ? `<button class="btn pri big" data-act="flowStart">流す（くり返し）</button><div class="textlist">${list.map(id => `<div class="r"><span>${esc(id)}・${esc(ITEMS[id].speaker.name)}</span><span class="sub">${S.rec[id] ? ymd(new Date(S.rec[id].last)).slice(5) : ""}</span></div>`).join("")}</div>`
       : `<p class="sub">スピーチの問題を解いて解説を見たときに「聞き流しに登録」を押すと、ここに入ります。</p>`}
+    <h2 style="margin-top:8px">シャドーイング</h2>
+    <p class="sub" style="margin:0">${esc(TXT.shadowNote)}</p>
+    ${sp.length || dl.length ? `${sp.length ? `<div class="lab">SPEECH · スピーチ</div><div class="textlist">${sp.map(id => row(id, ITEMS[id].speaker.name)).join("")}</div>` : ""}
+      ${dl.length ? `<div class="lab">DIALOG · 対話</div><div class="textlist">${dl.map(id => row(id, ITEMS[id].speakers.map(s => s.name).join(" と "))).join("")}</div>` : ""}`
+      : `<p class="sub">${esc(TXT.shadowEmpty)}</p>`}
   </div>`;
+}
+
+// ---------- 流し聞きとシャドーイング（くり返し＝止めるまで・速さは毎回入れ直す＝applyRate） ----------
+let loopTok = 0;
+async function loopWait(sec) {   // 一時停止の間は数えない
+  const tok = loopTok; let left = sec * 1000;
+  while (left > 0) {
+    await new Promise(r => setTimeout(r, 100));
+    if (tok !== loopTok) throw new Error("stop");
+    if (!V.paused) left -= 100;
+  }
+}
+async function untilResumed() { const tok = loopTok; while (V.paused) { await new Promise(r => setTimeout(r, 100)); if (tok !== loopTok) throw new Error("stop"); } }
+function setMedia(title, album) {   // ロック画面・通知の表示（Media Session）。画面を消したときの動きは【未実測】（実機の試験待ち）
+  try {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist: "英語リスニング", album });
+    if (!setMedia.done) {
+      setMedia.done = true;
+      navigator.mediaSession.setActionHandler("play", () => { if (isLoopView() && V.paused) ACT.play(); else au.play().catch(() => {}); });
+      navigator.mediaSession.setActionHandler("pause", () => { if (isLoopView() && !V.paused) ACT.play(); else au.pause(); });
+      try { navigator.mediaSession.setActionHandler("nexttrack", () => { if (V.name === "flowPlay") ACT.flowNext(); }); } catch (_) {}
+    }
+  } catch (_) {}
+}
+// 流し聞き：登録したスピーチを順に流し、最後まで行ったら最初へ（止めるまで）
+async function runFlow() {
+  const tok = ++loopTok, E = V;
+  try {
+    for (;;) {
+      const it = ITEMS[E.ids[E.i]];
+      setMedia(`${it.id}・${it.speaker.name}`, "流し聞き");
+      paintLoop();
+      const ok = await playFile(it.audio.speech.file);
+      if (tok !== loopTok) return;
+      if (!ok) { E.paused = true; E.stalled = true; mountPlayer(vPlayer()); paintPlayer(); await untilResumed(); E.stalled = false; continue; }   // 鳴らせなかった＝▶ で同じスピーチを頭から
+      await loopWait(1.5);
+      E.i = (E.i + 1) % E.ids.length;
+      if (E.i === 0) E.round++;
+    }
+  } catch (e) { if (String(e.message) !== "stop") toast("止まりました：" + e.message); }
+}
+// シャドーイングの文の区切り。対話は区間（segments）のまま。スピーチは区間が1本なので、音声の文の間（1.5 秒の無音）から取る＝問題のパックは変えない。
+// 物差し＝-40dB・0.9 秒（ffmpeg silencedetect で 40本とも「文の数−1」と一致した値・2026-11-23）。数が合わなければ字数で割った目安。
+const SENT_CACHE = {};
+function splitSentences(t) {   // Mr. Mt. などで切らない
+  const out = []; let cur = "";
+  for (const w of String(t).trim().split(/\s+/)) {
+    cur = cur ? cur + " " + w : w;
+    if (/[.!?]["')]?$/.test(w) && !/^(Mr|Mrs|Ms|Mt|Dr|St)\.$/.test(w)) { out.push(cur); cur = ""; }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+async function silenceGaps(file) {
+  const url = await audioUrl(file);
+  try {
+    const buf = await (await fetch(url)).arrayBuffer();
+    const C = window.AudioContext || window.webkitAudioContext;
+    beep.ctx = beep.ctx || new C();
+    const ab = await new Promise((res, rej) => { const p = beep.ctx.decodeAudioData(buf, res, rej); if (p && p.then) p.then(res, rej); });
+    const d = ab.getChannelData(0), sr = ab.sampleRate, win = Math.max(1, Math.round(sr * 0.01)), thr = 0.01, minRun = 0.9;
+    const gaps = []; let run = null;
+    for (let i = 0; i * win < d.length; i++) {
+      let m = 0; for (let j = i * win, e = Math.min(d.length, j + win); j < e; j++) { const v = d[j] < 0 ? -d[j] : d[j]; if (v > m) m = v; }
+      const t = i * win / sr;
+      if (m < thr) { if (run == null) run = t; }
+      else if (run != null) { if (t - run >= minRun && run > 0.3) gaps.push([run, t]); run = null; }
+    }
+    return gaps;   // 終わりの無音は数えない（最後まで無音のまま＝run が残る）
+  } finally { if (url.startsWith("blob:")) URL.revokeObjectURL(url); }
+}
+async function sentencesOf(it) {
+  if (it.type === "sz1-pick") return it.audio.main.segments.map(s => ({ text: s.text, who: s.who, start: Math.max(0, s.start - 0.05), end: s.start + s.sec + 0.1 }));
+  const a = it.audio.speech;
+  if (SENT_CACHE[a.file]) return SENT_CACHE[a.file];
+  const texts = splitSentences(it.speech);
+  let gaps = null;
+  try { gaps = await silenceGaps(a.file); } catch (_) {}
+  let out;
+  if (gaps && gaps.length === texts.length - 1) {
+    out = texts.map((text, k) => ({ text, start: k ? gaps[k - 1][1] - 0.1 : 0, end: k < gaps.length ? gaps[k][0] + 0.1 : a.sec }));
+  } else {
+    const lens = texts.map(t => t.length + 20), sum = lens.reduce((x, y) => x + y, 0);
+    let acc = 0.2;
+    out = texts.map((text, k) => { const start = acc; acc += (a.sec - 0.2) * lens[k] / sum; return { text, start, end: acc, approx: true }; });
+  }
+  return (SENT_CACHE[a.file] = out);
+}
+// シャドーイング：文を1つ流す → その文の長さぶん（いまの速さで）待つ → 次の文。最後まで行ったら最初から（止めるまで）
+async function runShadow() {
+  const tok = ++loopTok, E = V;
+  try {
+    if (!E.sents) {
+      E.phase = "prep"; paintLoop();
+      const sents = await sentencesOf(ITEMS[E.id]);
+      if (tok !== loopTok) return;
+      E.sents = sents; render();
+    }
+    const it = ITEMS[E.id], file = mainFile(it);
+    setMedia(`${it.id}・シャドーイング`, "シャドーイング");
+    for (;;) {
+      for (; E.k < E.sents.length; E.k++) {
+        const s = E.sents[E.k];
+        E.phase = "listen"; paintLoop();
+        const ok = await playFile(file, s.start, s.end);
+        if (tok !== loopTok) return;
+        if (!ok) { E.paused = true; E.stalled = true; mountPlayer(vPlayer()); paintPlayer(); await untilResumed(); E.stalled = false; E.k--; continue; }
+        E.phase = "say"; paintLoop();
+        await loopWait(Math.max(1, (s.end - s.start) / curRate()));
+      }
+      E.k = 0; E.round++;
+      E.phase = "listen"; paintLoop();
+      await loopWait(1.5);
+    }
+  } catch (e) { if (String(e.message) !== "stop") toast("止まりました：" + e.message); }
+}
+function vFlowPlay() {
+  const E = V;
+  return `<div class="stack"><div class="qhead"><button class="close" data-act="loopStop" aria-label="やめる">✕</button>
+    <span class="pos">流し聞き</span><span class="gap"></span><span class="sub num" id="loopRound"></span></div>
+    <div>${E.ids.map((id, i) => `<button class="ln${i === E.i ? " now" : ""}" data-act="flowJump" data-i="${i}"><span class="w">${esc(ITEMS[id].speaker.name)}</span>${esc(id)}</button>`).join("")}</div></div>`;
+}
+function vShadow() {
+  const E = V, it = ITEMS[E.id];
+  const nameOf = w => (it.speakers ? (it.speakers.find(s => s.id === w) || {}).name : it.speaker.name) || "Question";
+  const body = E.sents
+    ? `${E.sents.some(s => s.approx) ? `<p class="small" style="margin:0">${esc(TXT.approx)}</p>` : ""}<div class="lyrics">${E.sents.map((s, k) => `<button class="ln" data-act="shadowJump" data-k="${k}">${s.who ? `<span class="w">${esc(nameOf(s.who))}</span>` : ""}${esc(s.text)}</button>`).join("")}</div>`
+    : `<p class="sub">文の区切りを調べています…</p>`;
+  return `<div class="stack"><div class="qhead"><button class="close" data-act="loopStop" aria-label="やめる">✕</button>
+    <span class="pos">シャドーイング</span><span class="sub">${esc(it.id)}</span><span class="gap"></span><span class="sub num" id="loopRound"></span></div>
+    <div class="cue" id="shCue"></div>${body}</div>`;
+}
+// 描き直さずに、いまの文・済んだ文・合図だけ塗り替える
+function paintLoop() {
+  const E = V;
+  const r = document.getElementById("loopRound"); if (r) r.textContent = E.round > 1 ? `${E.round}周目` : "";
+  if (E.name === "flowPlay") document.querySelectorAll(".ln").forEach((b, i) => b.classList.toggle("now", i === E.i));
+  if (E.name === "shadow") {
+    const c = document.getElementById("shCue");
+    if (c) c.textContent = E.phase === "say" ? "まねして言う" : E.phase === "prep" ? "" : "聞く";
+    document.querySelectorAll(".lyrics .ln").forEach((b, k) => { b.classList.toggle("now", k === E.k); b.classList.toggle("past", k < E.k); });
+    const now = document.querySelector(".lyrics .ln.now");
+    if (now && now !== paintLoop.last) { paintLoop.last = now; try { now.scrollIntoView({ block: "center", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }); } catch (_) {} }
+  }
+  paintPlayer();
 }
 
 function vSettings() {
@@ -497,6 +715,7 @@ function vSettings() {
     <div><div class="lab">SETTINGS</div><h1>設定</h1></div>
     <div class="card stack"><h2>アクセントの色</h2>
       <div class="colors">${ACCENTS.map((a, i) => `<button data-act="accent" data-i="${i}" style="background:${a.c}" aria-label="${a.name}" aria-pressed="${S.settings.accent === i}"></button>`).join("")}</div></div>
+    <div class="card stack"><h2>再生の速さ</h2>${vRatePanel()}</div>
     <div class="card stack"><h2>オフラインの保存</h2><span class="sub">${st}</span>${S.pack ? `<button class="btn sm" data-act="resave">保存し直す</button>` : ""}${vSaveNotice()}</div>
     <div class="card stack"><h2>学習の記録</h2>
       <span class="sub">機種を替えるときや、保存が消えたときのために書き出せます（端末の中だけに入っています）。</span>
@@ -813,7 +1032,17 @@ function vPlayer() {
     return `<div class="player" id="player"><div class="in">${wave}<div class="ctl">
       <button class="btn sm" data-act="examQuit">やめる</button>
       <button class="play" data-act="examPause" aria-label="一時停止">${V.paused ? playIcon() : pauseIcon()}</button>
-      <span class="chip num" style="display:grid;place-items:center">1.0x</span></div>
+      <span class="chip num" style="display:grid;place-items:center" aria-label="速さ（本番の途中では変えない）">${fmtRate(V.rate || curRate())}x</span></div>
+      <div class="time" id="ptime"></div></div></div>`;
+  }
+  const rateChip = `<button class="chip num" data-act="rate" aria-expanded="${rateOpen}" aria-label="再生の速さ">${fmtRate(curRate())}x</button>`;
+  const rateBox = rateOpen ? `<div class="ratebox">${vRatePanel()}</div>` : "";
+  if (isLoopView()) {
+    const left = V.name === "flowPlay"
+      ? `<div class="row" style="gap:8px"><button class="chip" data-act="back5">−5秒</button><button class="chip" data-act="flowNext">次へ</button></div>`
+      : `<button class="chip" data-act="shadowAgain">この文をもう一度</button>`;
+    return `<div class="player" id="player"><div class="in">${rateBox}${wave}<div class="ctl">${left}
+      <button class="play" data-act="play" aria-label="再生・一時停止">${V.paused ? playIcon() : pauseIcon()}</button>${rateChip}</div>
       <div class="time" id="ptime"></div></div></div>`;
   }
   const it = curItem(), st = V.st;
@@ -824,10 +1053,10 @@ function vPlayer() {
   } else {
     decide = `<div class="decide"><button class="btn sure" data-act="next">${V.i + 1 < V.ids.length ? "次へ" : "結果を見る"}</button></div>`;
   }
-  const extra = it.type === "sz2-fill" ? `<button class="chip" data-act="playQ">質問</button>` : `<button class="chip" data-act="rate">1.0x</button>`;
-  return `<div class="player" id="player"><div class="in">${decide}${wave}
-    <div class="ctl"><button class="chip" data-act="back5">−5秒</button>
-      <button class="play" data-act="play" aria-label="再生">${playIcon()}</button>${extra}</div>
+  const qChip = it.type === "sz2-fill" ? `<button class="chip" data-act="playQ">質問</button>` : "";
+  return `<div class="player" id="player"><div class="in">${rateBox}${decide}${wave}
+    <div class="ctl"><div class="row" style="gap:8px"><button class="chip" data-act="back5">−5秒</button>${qChip}</div>
+      <button class="play" data-act="play" aria-label="再生">${playIcon()}</button>${rateChip}</div>
     <div class="time" id="ptime"></div></div></div>`;
 }
 const playIcon = () => `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 4.5v15l13-7.5z"/></svg>`;
@@ -837,10 +1066,15 @@ function paintPlayer() {
   const playing = !au.paused && !au.ended;
   p.classList.toggle("playing", playing);
   const b = p.querySelector('[data-act="play"]');
-  if (b) b.innerHTML = playing ? pauseIcon() : playIcon();
+  // 流し聞き・シャドーイングは、文と文の間（音が止まっている）も動いている＝ボタンは一時停止の状態で決める
+  if (b) b.innerHTML = (isLoopView() ? !V.paused : playing) ? pauseIcon() : playIcon();
   const t = document.getElementById("ptime");
-  const mine = V.name === "q" && curFile && Object.values(curItem().audio || {}).some(a => a.file === curFile);
-  if (t) t.textContent = V.name === "exam" ? (V.cue || "") : (mine ? fmt(au.currentTime) + " / " + fmt(au.duration) : "");
+  const mine = (V.name === "q" || V.name === "flowPlay") && curFile && Object.values(curItem().audio || {}).some(a => a.file === curFile);
+  if (!t) return;
+  if (V.name === "exam") t.textContent = V.cue || "";
+  else if (V.name === "flowPlay") t.textContent = `${V.i + 1} / ${V.ids.length}　` + (mine ? fmt(au.currentTime) + " / " + fmt(au.duration) : "");
+  else if (V.name === "shadow") t.textContent = V.sents ? `文 ${Math.min(V.k + 1, V.sents.length)} / ${V.sents.length}` : "";
+  else t.textContent = mine ? fmt(au.currentTime) + " / " + fmt(au.duration) : "";
 }
 
 // ----- 解いたあとの結果 -----
@@ -859,7 +1093,8 @@ function vExamIntro() {
   return `<div class="stack">
     <div class="row"><button class="btn sm" data-act="back">← 戻る</button></div>
     <div><div class="lab">EXAM · NO.${e.no}</div><h1>本番の形で通す</h1></div>
-    <div class="card stack"><span class="ja">(1) 対話を聞いて絵を選ぶ 4問：会話と質問を<b>2回</b>ずつ。答える時間は約6秒。<br>(2) スピーチ 3問：質問を1回読んだあと、スピーチを<b>2回</b>。答える時間は約20秒。<br>全部で約10分。途中で止められるのは一時停止だけです。速さは本番と同じ 1.0倍。</span></div>
+    <div class="card stack"><span class="ja">(1) 対話を聞いて絵を選ぶ 4問：会話と質問を<b>2回</b>ずつ。答える時間は約6秒。<br>(2) スピーチ 3問：質問を1回読んだあと、スピーチを<b>2回</b>。答える時間は約20秒。<br>全部で約10分。途中で止められるのは一時停止だけです。</span></div>
+    <div class="card stack"><h2>再生の速さ</h2><p class="small" style="margin:0">${esc(TXT.examRate(fmtRate(curRate())))}</p>${vRatePanel()}</div>
     <label class="paper"><input type="checkbox" data-act="paper" ${S.settings.paper ? "checked" : ""}>(2) は紙に書いて、あとで自己採点する</label>
     <button class="btn pri big" data-act="examStart">はじめる</button>
   </div>`;
@@ -942,7 +1177,7 @@ function examGrade() {
   }
   const it2 = ITEMS[E.e.sz2], st2 = E.st[it2.id];
   st2.done = true; gradeSz2(it2, st2);
-  go({ name: "examEnd", e: E.e, st: E.st, p1, res, saved: false });
+  go({ name: "examEnd", e: E.e, st: E.st, p1, res, saved: false, rate: E.rate });
   if (saveExam(V)) render();   // 自己採点の残りが無ければ、答え合わせの時点で全部記録
 }
 function vExamEnd() {
@@ -951,6 +1186,7 @@ function vExamEnd() {
   return `<div class="stack">
     <div class="lab">EXAM · NO.${E.e.no} · RESULT</div>
     <h1>${total}<span class="sub" style="font-size:18px"> / 14 点</span></h1>
+    ${E.rate ? `<p class="sub" style="margin:0">${esc(TXT.examEndRate(fmtRate(E.rate)))}</p>` : ""}
     <div class="stats"><div class="card"><div class="lab">(1) 対話</div><b>${E.p1}<span class="sub"> / 8</span></b><span class="sub">正答率 ${Math.round(E.p1 / 8 * 100)}%</span></div>
       <div class="card"><div class="lab">(2) スピーチ</div><b>${sc.pt}<span class="sub"> / 6</span></b><span class="sub">${sc.pending ? "自己採点のこり " + sc.pending : "正答率 " + Math.round(sc.pt / 6 * 100) + "%"}</span></div></div>
     <h2>(1) の答え</h2>
@@ -981,7 +1217,7 @@ function saveExam(E, force) {
   record(it2.id, sc.pt === 6, "exam", "exam", { pt: sc.pt });
   S.exams = S.exams || {};
   const total = E.p1 + sc.pt, prev = S.exams[E.e.no];
-  S.exams[E.e.no] = { best: Math.max(total, prev ? prev.best : 0), last: total, n: (prev ? prev.n : 0) + 1, t: Date.now() };
+  S.exams[E.e.no] = { best: Math.max(total, prev ? prev.best : 0), last: total, n: (prev ? prev.n : 0) + 1, t: Date.now(), rate: E.rate || 1 };   // 点数は速さに関係なく本番の記録・速さは残しておく
   E.saved = true; save(true);
   return true;
 }
@@ -1014,6 +1250,14 @@ const ACT = {
     if (V.st.done) return; V.st.sel = d.m; vibe(); render();
   },
   async play() {
+    if (isLoopView()) {   // 流し聞き・シャドーイング＝一時停止と続き
+      V.paused = !V.paused;
+      if (V.paused) au.pause();
+      else if (V.stalled) unlockAudio();   // 鳴らせなかったあと＝押した中で解錠してから、同じ所を鳴らし直す（ループが続ける）
+      else if (pending) { const p = au.play(); if (p && p.catch) p.catch(() => { if (pending) failPlay(); }); }
+      mountPlayer(vPlayer()); paintPlayer();
+      return;
+    }
     if (!au.paused && curFile) { au.pause(); return; }   // curFile が空＝解錠の無音が鳴っているだけ（止めずに問題の音声へ）
     const it = curItem(), st = V.st;
     const file = mainFile(it);
@@ -1028,7 +1272,35 @@ const ACT = {
     if (!curFile || !Object.values(it.audio || {}).some(a => a.file === curFile)) return;
     au.currentTime = Math.max(0, au.currentTime - 5); if (au.paused) au.play().catch(() => failPlay());
   },
-  rate() { toast("速さの変更は、スマホでの試験のあとで使えるようにします"); },
+  rate() { rateOpen = !rateOpen; mountPlayer(vPlayer()); paintPlayer(); },
+  // 速さを選ぶ＝端末に保存（次に開いても続く）・鳴っている音にもすぐ効かせる
+  setRate(d) {
+    const r = +d.r; if (!RATES.includes(r)) return;
+    S.settings.rate = r; save(true); rateFix = 0; applyRate();
+    if (hasPlayer()) { mountPlayer(vPlayer()); paintPlayer(); } else render();
+  },
+  flowStart() {
+    const wk = Date.now() - 7 * 864e5;
+    const reg = (S.flow || []).filter(id => ITEMS[id]);
+    const recent = reg.filter(id => S.rec[id] && S.rec[id].last >= wk);
+    const ids = recent.length ? recent : reg;
+    if (!ids.length) { toast("登録したスピーチがありません"); return; }
+    unlockAudio();   // 押した中で同期に（iPhone の自動再生の制限）
+    go({ name: "flowPlay", ids, i: 0, round: 1, paused: false });
+    runFlow();
+  },
+  flowJump(d) { V.i = +d.i; V.paused = false; unlockAudio(); runFlow(); mountPlayer(vPlayer()); },
+  flowNext() { V.i = (V.i + 1) % V.ids.length; if (V.i === 0) V.round++; V.paused = false; unlockAudio(); runFlow(); mountPlayer(vPlayer()); },
+  shadow(d) {
+    if (!ITEMS[d.id]) return;
+    unlockAudio();
+    go({ name: "shadow", id: d.id, ids: [d.id], i: 0, k: 0, round: 1, paused: false, sents: null, phase: "prep" });
+    keepAwake(true);
+    runShadow();
+  },
+  shadowJump(d) { if (!V.sents) return; V.k = +d.k; V.paused = false; unlockAudio(); runShadow(); mountPlayer(vPlayer()); },
+  shadowAgain() { if (!V.sents) return; V.paused = false; unlockAudio(); runShadow(); mountPlayer(vPlayer()); },
+  loopStop() { stopAudio(); keepAwake(false); TAB = "flow"; go({ name: "flow" }); },
   async line(d) {
     const it = curItem();
     if (it.type === "sz1-pick") {
@@ -1089,7 +1361,7 @@ const ACT = {
     const st = {}; for (const id of [...e.sz1, e.sz2]) st[id] = freshQ();
     st[e.sz2].paper = !!S.settings.paper;
     unlockAudio();   // 押した中で同期に（iPhone の自動再生の制限・合図の音の AudioContext も）
-    go({ name: "exam", e, st, part: 1, k: 0, paused: false, cue: "" });
+    go({ name: "exam", e, st, part: 1, k: 0, paused: false, cue: "", rate: curRate() });   // 速さは始めたときの値（本番の途中では変えない）
     keepAwake(true);
     runExam();
   },
