@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "8c33caac0e";
+const APP_VER = "399d35f162";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -34,6 +34,13 @@ const RATES = Array.from({ length: 12 }, (_, i) => Math.round((0.9 + i * 0.1) * 
 const RATE_DEFAULT = 1.1;
 // 今日の3問＝対話2＋スピーチ1（同じ日の追加の依頼・選択肢の答え）
 const TODAY_SZ1 = 2, TODAY_SZ2 = 1;
+// ご意見・不具合の報告（アプリの中から受け口＝Google Apps Script のウェブアプリへ送る）。
+// FEEDBACK_URL＝受け口の /exec。空のあいだは「送る」を出さず、端末に残すだけ。
+// 送るのは利用者が押したときだけ・1件ずつ・URL には何も載せない（POST の本文）。種類の文言は Code.gs の KINDS と一字一致。
+const FEEDBACK_URL = "https://script.google.com/macros/s/AKfycbxHeuV0mSIeXhw4huIgZM3hPXqRmoLTv4JlhpVbOn7rQCxPv6KgGkSKBzI8GcqSOxSP/exec";
+const FB_KINDS_Q = ["答え・解説がおかしい", "音声がおかしい", "文字のまちがい", "その他"];
+const FB_KINDS_SET = ["使い方が分からない", "動かない・おかしい", "こうしてほしい", "その他"];
+const FB_MAX = 200;
 // 画面の文（推敲した稿）
 const TXT = {
   rateNote: "はじめは入試の放送より少し速い 1.1倍にしてあります。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
@@ -43,6 +50,22 @@ const TXT = {
   approx: "この問題は音声から文の区切りを見つけられなかったので、区切る位置は目安です。",
   examRate: r => `選んだ速さのまま、途中で変えずに最後まで進みます（いまは ${r}倍）。入試の放送は 1.0倍です。点数は速さに関係なく本番の記録として残します。`,
   examEndRate: r => `速さ ${r}倍のまま最後まで解きました（入試の放送は 1.0倍）。`,
+  fbNote: "名前・学校・連絡先は書かないでください。返事はできません。",
+  fbWhatQ: "送るのは、種類・書いた文・問題の番号・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
+  fbWhatSet: "送るのは、種類・書いた文・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
+  fbAudio: "先に、消音（マナーモード）になっていないか、音量が小さすぎないかを確かめてください。",
+  fbPhQ: "どこがおかしいか（書かなくてもかまいません）",
+  fbPhSet: "くわしい内容（書かなくてもかまいません）",
+  fbPickKind: "どれに近いか、種類を1つ選んでください",
+  fbOk: "届きました。ありがとう！",
+  fbFail: "いまは送れませんでした。端末に残したので、つながったときに設定から送れます。",
+  fbClosed: "いまは受付を休んでいます（端末に残しました）。",
+  fbLimit: "今日の受付はいっぱいです。端末に残したので、明日また送ってください。",
+  fbSaved: "端末に残しました（設定の「学習の記録」を書き出すと、一緒に入ります）。",
+  fbCountLocal: n => `端末に残した報告 ${n}件（「学習の記録」を書き出すと、一緒に入ります）`,
+  fbAllPart: n => `${n}件 届きました。残りは送れず、端末に残っています。つながったときにまた送れます。`,
+  fbSavedLater: "端末に残しました。あとで設定の「まとめて送る」から送れます。",
+  fbSending: "送っています…",
 };
 
 // ---------- 小さな道具 ----------
@@ -79,6 +102,7 @@ let S = (() => {
       const s = Object.assign(blank(), x), b = blank();
       for (const k of ["settings", "rec", "listen"]) if (!s[k] || typeof s[k] !== "object" || Array.isArray(s[k])) s[k] = b[k];
       for (const k of ["flow", "reports"]) if (!Array.isArray(s[k])) s[k] = b[k];
+      s.reports = fbFixAll(s.reports);
       return s;
     }
   } catch (_) {}
@@ -91,6 +115,58 @@ function save(now) {
   if (now) { clearTimeout(saveTimer); go(); }
   else if (!saveTimer) saveTimer = setTimeout(go, 400);
 }
+// ---------- ご意見・不具合の報告 ----------
+// 1件の形：{rid, id(問題の番号 or ""), t, kind, text, pack, shell, from:"問題"|"設定", sent: 0|送った時刻}
+function fbRid() {   // 受け口が二重に入れないための番号（20字・[0-9a-z]）
+  const a = "0123456789abcdefghijklmnopqrstuvwxyz";
+  let s = "";
+  try { for (const x of crypto.getRandomValues(new Uint8Array(40))) { if (x < 252) s += a[x % 36]; if (s.length === 20) break; } } catch (_) {}
+  while (s.length < 20) s += a[Math.floor(Math.random() * 36)];
+  return s;
+}
+// 古い報告（rid が無い＝この仕組みより前の版で残したもの）と、記録の読み込みで入った報告を今の形にそろえる
+function fbFix(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+  const x = Object.assign({}, r);
+  if (typeof x.rid !== "string" || !/^[A-Za-z0-9_-]{8,40}$/.test(x.rid)) x.rid = fbRid();
+  if (![...FB_KINDS_Q, ...FB_KINDS_SET].includes(x.kind)) x.kind = "その他";
+  if (x.from !== "問題" && x.from !== "設定") x.from = "問題";
+  x.id = typeof x.id === "string" ? x.id : "";
+  x.text = String(x.text == null ? "" : x.text);
+  x.t = Number(x.t) > 0 ? Number(x.t) : Date.now();
+  x.pack = String(x.pack || ""); x.shell = String(x.shell || "");
+  x.sent = Number(x.sent) > 0 ? Number(x.sent) : 0;
+  return x;
+}
+function fbFixAll(list) { return (Array.isArray(list) ? list : []).map(fbFix).filter(Boolean); }
+// 端末の種類は3つだけ（機種名は送らない）。iPad と、触れる Mac（iPadOS の Safari）は iPhone に入れる
+function fbDev() {
+  const ua = navigator.userAgent || "";
+  if (/Android/i.test(ua)) return "Android";
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return "iPhone";
+  return "PC";
+}
+// 1件を送る（押したときだけ呼ぶ）。返り値＝"ok"｜"closed"｜"limit"｜"fail"（つながらない・15秒・受け口の不調）
+// 文字列の body＝text/plain＝事前の問い合わせ（preflight）が出ない。資格情報は付けない。
+async function fbSend(r) {
+  if (!FEEDBACK_URL) return "fail";
+  if (r.sent) return "ok";
+  if (navigator.onLine === false) return "fail";
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), 15000) : null;
+  try {
+    const body = { app: "sl-jhs", id: r.rid, from: r.from, kind: r.kind, text: (r.text.trim() || "（ひとことなし）").slice(0, FB_MAX), q: r.id || "", pack: r.pack, shell: r.shell, dev: fbDev(), t: r.t };
+    const res = await fetch(FEEDBACK_URL, { method: "POST", body: JSON.stringify(body), credentials: "omit", cache: "no-store", redirect: "follow", signal: ctl ? ctl.signal : undefined });
+    const j = await res.json();
+    if (j && j.ok === true) { r.sent = Date.now(); save(true); return "ok"; }
+    return j && (j.reason === "closed" || j.reason === "limit") ? j.reason : "fail";
+  } catch (_) { return "fail"; }
+  finally { if (timer) clearTimeout(timer); }
+}
+function fbMsg(res) { return { ok: TXT.fbOk, closed: TXT.fbClosed, limit: TXT.fbLimit }[res] || TXT.fbFail; }
+function fbDate(t) { const d = new Date(t); return (d.getMonth() + 1) + "/" + d.getDate() + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); }
+let fbBusy = false;   // まとめて送っている間
+
 function applyAccent() {
   const a = ACCENTS[S.settings.accent] || ACCENTS[0];
   document.documentElement.style.setProperty("--ac", a.c);
@@ -479,7 +555,23 @@ function startSession(ids, mode, label) {
   go({ name: "q", mode, label, ids, i: 0, results: [], st: freshQ() });
   keepAwake(true);
 }
-function freshQ() { return { sel: null, done: false, plays: 0, qplays: 0, inputs: {}, grade: null, self: {}, paper: !!S.settings.paper, reportOpen: false, flowAsked: false }; }
+function freshQ() { return { sel: null, done: false, plays: 0, qplays: 0, inputs: {}, grade: null, self: {}, paper: !!S.settings.paper, fb: null, flowAsked: false }; }
+// 報告の書きかけ（開いているか・選んだ種類・ひとこと）。問題では問題ごと、設定では設定の画面ごと
+function fbState() {
+  const host = V.name === "q" && V.st ? V.st : V;
+  return host.fb || (host.fb = { open: false, kind: "", text: "" });
+}
+function fbTake() { const ta = $("#fbTxt"); if (ta) fbState().text = ta.value; }
+// 書いた報告を1件にして、先に端末へ保存する（送れなくても消えない）。種類が無ければ聞いて null
+function fbMake() {
+  fbTake();
+  const f = fbState(), inQ = V.name === "q";
+  if (!f.kind) { toast(TXT.fbPickKind); return null; }
+  const r = { rid: fbRid(), id: inQ ? curItem().id : "", t: Date.now(), kind: f.kind, text: f.text.trim().slice(0, FB_MAX), pack: PACK.version, shell: APP_VER, from: inQ ? "問題" : "設定", sent: 0 };
+  S.reports.push(r); save(true);
+  Object.assign(f, { open: false, kind: "", text: "" });
+  return r;
+}
 
 // ---------- 描画 ----------
 // 下のプレイヤーを描き、その実際の高さを --plh に入れる（app.css の下の余白＝隠れて押せない所を作らない）
@@ -756,7 +848,7 @@ function vSettings() {
       <span class="sub">機種を替えるときや、保存が消えたときのために書き出せます（端末の中だけに入っています）。</span>
       <div class="row"><button class="btn sm" data-act="export">書き出す</button><button class="btn sm" data-act="importOpen">読み込む</button></div>
       <div id="ioBox"></div></div>
-    <div class="card stack"><h2>「この問題おかしい」の報告</h2><span class="sub">${(S.reports || []).length} 件（書き出すと一緒に入ります）</span></div>
+    ${vFbCard()}
     <p class="small">問題・音声はすべてオリジナル（過去の入試の文・音声は使っていません）。音声は合成音声です。アプリの版 ${APP_VER}／問題の版 ${esc(PACK.version)}</p>
   </div>`;
 }
@@ -930,9 +1022,32 @@ function vExplainSz1(it, st) {
   </div>`;
 }
 function vReport(it, st) {
-  if (!st.reportOpen) return `<button class="btn sm ghost" data-act="report">この問題おかしい</button>`;
-  return `<div class="stack"><textarea id="repTxt" placeholder="どこがおかしいか（例：音声と台本が違う・答えが2つある）"></textarea>
-    <div class="row"><button class="btn sm pri" data-act="reportSave">端末に残す</button><button class="btn sm" data-act="report">閉じる</button></div></div>`;
+  const f = fbState();
+  if (!f.open) return `<button class="btn sm ghost" data-act="report">この問題おかしい</button>`;
+  return vFbForm(f, FB_KINDS_Q);
+}
+// 報告の書く欄（問題と設定で同じ形・種類だけ違う）。チップで描き直してもひとことは f.text から戻す
+function vFbForm(f, kinds) {
+  const inSet = V.name === "settings";
+  return `<div class="stack fbf">
+    <div class="fbk" role="group" aria-label="種類">${kinds.map((k, i) => `<button class="fbc" data-act="fbKind" data-k="${i}" aria-pressed="${f.kind === k}">${esc(k)}</button>`).join("")}</div>
+    ${f.kind === "音声がおかしい" ? `<p class="small fbwarn" style="margin:0">${esc(TXT.fbAudio)}</p>` : ""}
+    <textarea id="fbTxt" maxlength="${FB_MAX}" placeholder="${esc(inSet ? TXT.fbPhSet : TXT.fbPhQ)}">${esc(f.text)}</textarea>
+    <p class="small" style="margin:0">${esc(TXT.fbNote)}${FEEDBACK_URL ? "<br>" + esc(inSet ? TXT.fbWhatSet : TXT.fbWhatQ) : ""}</p>
+    <div class="row">${FEEDBACK_URL ? `<button class="btn sm pri" data-act="fbGo">送る</button>` : ""}<button class="btn sm${FEEDBACK_URL ? "" : " pri"}" data-act="fbSave">端末に残す</button><button class="btn sm ghost" data-act="${inSet ? "fbOpen" : "report"}">閉じる</button></div>
+  </div>`;
+}
+// 設定のカード：書く・まだ送っていない報告（1件ずつ消せる＝2回押し）・まとめて送る・送った件数
+function vFbCard() {
+  const f = fbState();
+  const wait = S.reports.filter(r => !r.sent), sent = S.reports.length - wait.length;
+  const cut = s => (s.length > 40 ? s.slice(0, 40) + "…" : s);
+  const list = wait.slice().reverse().map(r => `<li class="fbi"><div><span class="sub num">${esc(fbDate(r.t))}${r.id ? "・" + esc(r.id) : ""}</span><br><b>${esc(r.kind)}</b>${r.text.trim() ? "：" + esc(cut(r.text.trim())) : ""}</div><button class="btn sm ghost" data-act="fbDel" data-rid="${esc(r.rid)}">消す</button></li>`).join("");
+  return `<div class="card stack"><h2>ご意見・不具合の報告</h2>
+    <span class="sub">${FEEDBACK_URL ? `まだ送っていない報告 ${wait.length}件・送った報告 ${sent}件` : esc(TXT.fbCountLocal(wait.length))}</span>
+    ${f.open ? vFbForm(f, FB_KINDS_SET) : `<div class="row"><button class="btn sm" data-act="fbOpen">書く</button>${FEEDBACK_URL && wait.length ? `<button class="btn sm pri" data-act="fbAll" ${fbBusy ? "disabled" : ""}>${fbBusy ? esc(TXT.fbSending) : "まとめて送る"}</button>` : ""}</div>`}
+    ${wait.length ? `<ul class="fbl">${list}</ul>` : ""}
+  </div>`;
 }
 
 // 記述（型の仕様 §3・§5）
@@ -1369,11 +1484,35 @@ const ACT = {
     if (V.name === "examEnd") saveExam(V);   // 残りが無くなったら、その場で記録
     render();
   },
-  report() { V.st.reportOpen = !V.st.reportOpen; render(); },
-  reportSave() {
-    const t = ($("#repTxt") || {}).value || "";
-    S.reports = S.reports || []; S.reports.push({ id: curItem().id, t: Date.now(), text: t.slice(0, 500), pack: PACK.version });
-    V.st.reportOpen = false; save(); toast("端末に残しました（設定の「書き出す」で一緒に出ます）"); render();
+  report() { const f = fbState(); fbTake(); f.open = !f.open; render(); },   // 問題の「この問題おかしい」と「閉じる」
+  fbOpen() { const f = fbState(); fbTake(); f.open = !f.open; render(); },   // 設定の「書く」と「閉じる」
+  fbKind(d) {
+    const kinds = V.name === "settings" ? FB_KINDS_SET : FB_KINDS_Q;
+    const k = kinds[+d.k]; if (!k) return;
+    fbTake(); fbState().kind = k; render();
+  },
+  fbSave() { if (fbMake()) { toast(FEEDBACK_URL ? TXT.fbSavedLater : TXT.fbSaved, 3500); render(); } },
+  async fbGo() {
+    const r = fbMake(); if (!r) return;
+    render(); toast(TXT.fbSending, 1500);
+    const res = await fbSend(r);
+    toast(fbMsg(res), res === "ok" ? 2600 : 4500);
+    if (V.name === "settings") render();
+  },
+  async fbAll() {
+    if (fbBusy || !FEEDBACK_URL) return;
+    const list = S.reports.filter(r => !r.sent); if (!list.length) return;
+    fbBusy = true; render();
+    let n = 0, res = "ok";
+    for (const r of list) { res = await fbSend(r); if (res !== "ok") break; n++; }   // closed・limit・つながらないで止める
+    fbBusy = false;
+    // 途中で止まったとき：つながらない＝残りの知らせ／受付の休み・上限＝届いた件数のあとにその知らせ
+    toast(res === "ok" ? `${n}件 ${TXT.fbOk}` : n && res === "fail" ? TXT.fbAllPart(n) : (n ? `${n}件 届きました。` : "") + fbMsg(res), 4500);
+    if (V.name === "settings") render();
+  },
+  fbDel(d, el) {   // 2回押しで消す（3秒たつと戻る）
+    if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "もう一度押すと消えます"; setTimeout(() => { el.dataset.sure = ""; el.textContent = "消す"; }, 3000); return; }
+    S.reports = S.reports.filter(r => r.rid !== d.rid); save(true); render();
   },
   flowReg() {
     const id = curItem().id; S.flow = S.flow || [];
@@ -1440,7 +1579,7 @@ const ACT = {
     if (!obj(x.rec) || bad.length) { toast("記録が壊れています（" + (bad.join("・") || "rec") + "）"); return; }
     if (Object.values(x.rec).some(r => !obj(r) || !Array.isArray(r.hist))) { toast("記録が壊れています（rec の中身）"); return; }
     if (el.dataset.sure !== "1") { el.dataset.sure = "1"; el.textContent = "もう一度押すと入れ替えます"; return; }
-    Object.assign(S, { settings: Object.assign(S.settings, x.settings || {}), rec: x.rec || {}, flow: x.flow || [], listen: x.listen || {}, reports: x.reports || [], exams: x.exams || {}, today: null });
+    Object.assign(S, { settings: Object.assign(S.settings, x.settings || {}), rec: x.rec || {}, flow: x.flow || [], listen: x.listen || {}, reports: fbFixAll(x.reports), exams: x.exams || {}, today: null });
     save(true); toast("読み込みました"); render();
   },
 };
@@ -1466,6 +1605,7 @@ document.addEventListener("change", e => {
 });
 document.addEventListener("input", e => {
   if (e.target.matches && e.target.matches("input[data-rate]")) { onRateInput(e.target, false); return; }
+  if (e.target.id === "fbTxt") { fbState().text = e.target.value; return; }   // チップで描き直しても消えないように
   const el = e.target.closest("[data-in]"); if (!el) return;
   const st = V.name === "exam" ? V.st[V.e.sz2] : V.st;
   if (st) st.inputs[el.dataset.in] = el.value;
