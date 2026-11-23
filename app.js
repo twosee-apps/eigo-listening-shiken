@@ -1,7 +1,7 @@
 // 英語リスニング 第1弾の本体（2026-11-23・全体設計 v3 §2・§5・§6・型の仕様 §4-2・§5）。
 // 素の JS（ビルドなし）。再生の作りは 04_試作\再生試作 を引き継ぐ＝audio 要素1つを使い回す・保存した音声は Blob で流す。
 "use strict";
-const APP_VER = "d59d360ab4";
+const APP_VER = "4ec8d7cca8";
 const KEY = "eigo-listening-v1";
 const PACK_ID = "shizuoka";
 const MARKS = ["ア", "イ", "ウ", "エ"];
@@ -34,6 +34,13 @@ const KINDS = [
 // 全体設計 v3 §3 の「上限 1.5（それより上は合成音声が崩れる）」より上も選べる＝選択肢の答え。1.6 倍以上の聞こえ方は実機で見る。
 const RATES = Array.from({ length: 12 }, (_, i) => Math.round((0.9 + i * 0.1) * 10) / 10);
 const RATE_DEFAULT = 1.3;
+// 📎 同じ夕の追加の依頼＝目盛りの付け替え：画面の「1.0倍」で実際は 1.3倍で流す（表示＝実際 ÷ RATE_BASE）。
+// 端末に保存するのは今までどおり「実際の再生の速さ」＝前に選んだ人の速さは変わらない（表示だけ 1.15倍 などになる）。
+// 目盛りは表示で 0.7〜1.5・0.1 刻み（実際 0.91〜1.95＝前の 0.9〜2.0 とほぼ同じ幅）。
+// 目盛りに「入試」の印は付けない（入試の放送が目盛りの何倍にあたるかは担保できない＝0.8 の下にあった印を外した）。
+// 上の RATES（実際の 0.9〜2.0）は、保存された値を寄せる範囲としてだけ残す（前の版で 2.0 を選んだ人も 2.0 のまま＝表示 1.54）。
+const RATE_BASE = 1.3;
+const DISP = Array.from({ length: 9 }, (_, i) => Math.round((0.7 + i * 0.1) * 10) / 10);
 // 今日の3問＝対話2＋スピーチ1（同じ日の追加の依頼・選択肢の答え）
 const TODAY_SZ1 = 2, TODAY_SZ2 = 1;
 // ご意見・不具合の報告（アプリの中から受け口＝Google Apps Script のウェブアプリへ送る）。
@@ -45,13 +52,14 @@ const FB_KINDS_SET = ["使い方が分からない", "動かない・おかし�
 const FB_MAX = 200;
 // 画面の文（推敲した稿）
 const TXT = {
-  rateNote: "速さを変えていないときは、入試の放送（1.0倍）より速い 1.3倍で流れます。いまの聞き取りの力に合わせて、速さを調整してください。聞き取りにくいうちは 0.9倍くらいから始めて、慣れたら上げてください。",
+  // 入試の放送が目盛りの何倍にあたるかは担保できない＝「（入試の放送はおよそ 0.8倍です）」と結果の行の同じ括弧を外した
+  rateNote: "このアプリの 1.0倍は入試の放送より少し速くしてあります。速いと感じたら、自分に合う速さに変えてください。",
   flowNote: "登録したスピーチを順番に流し、最後まで行ったら最初に戻ります（止めるまで続きます）。くり返しても次のスピーチに替わっても、速さは選んだままです。画面を消しても流れ続けるかは、スマホによって違います。",
   shadowNote: "英文を1つ流したあと、同じ長さだけ音が止まります。その間に、聞いたとおりにまねして言ってください。最後の文まで行くと、最初からくり返します。流すのは、解いて台本を確かめた問題だけです。",
   shadowEmpty: "まだ解いた問題がありません。練習で問題を解くと、ここに出ます。",
   approx: "この問題は音声から文の区切りを見つけられなかったので、区切る位置は目安です。",
-  examRate: r => `選んだ速さのまま、途中で変えずに最後まで進みます（いまは ${r}倍）。入試の放送は 1.0倍です。点数は速さに関係なく本番の記録として残します。`,
-  examEndRate: r => `速さ ${r}倍のまま最後まで解きました（入試の放送は 1.0倍）。`,
+  examRate: r => `選んだ速さ（いまは ${r}倍）のまま最後まで進みます。途中では変えられません。点数は速さに関係なく本番の記録として残します。`,
+  examEndRate: r => `速さ ${r}倍で最後まで解きました。`,
   fbNote: "名前・学校・連絡先は書かないでください。返事はできません。",
   fbWhatQ: "送るのは、種類・書いた文・問題の番号・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
   fbWhatSet: "送るのは、種類・書いた文・アプリと問題の版・端末の種類（Android／iPhone／PC）だけです。",
@@ -395,10 +403,15 @@ function watchSeg() {
 }
 
 // ---------- 再生の速さ（端末に保存・次に開いても続く） ----------
-const snapRate = x => Math.min(RATES[RATES.length - 1], Math.max(RATES[0], Math.round(x * 10) / 10));
+// 実際の速さ（保存する値）は、前の範囲 0.9〜2.0 の中へ寄せるだけ（目盛りには寄せない＝前に選んだ速さを変えない）
+const clampRate = x => Math.min(RATES[RATES.length - 1], Math.max(RATES[0], x));
 // 前の版で選んだ 0.8 などは、いまの範囲の端へ寄せる（記録は壊さない）
-function curRate() { const r = +S.settings.rate; return isFinite(r) && r > 0 ? snapRate(r) : RATE_DEFAULT; }
-const fmtRate = r => r.toFixed(1);
+function curRate() { const r = +S.settings.rate; return isFinite(r) && r > 0 ? clampRate(r) : RATE_DEFAULT; }
+// 表示の値（実際 ÷ RATE_BASE）。目盛りに乗る値は小数1桁、乗らない値（前に選んだ 1.5 → 1.15 など）は2桁で出す
+const toDisp = r => r / RATE_BASE;
+const toReal = d => Math.round(d * RATE_BASE * 1000) / 1000;
+const snapDisp = d => Math.min(DISP[DISP.length - 1], Math.max(DISP[0], Math.round(d * 10) / 10));
+function fmtRate(r) { const d = toDisp(r), d1 = Math.round(d * 10) / 10; return Math.abs(d - d1) < 0.005 ? d1.toFixed(1) : d.toFixed(2); }
 // 声が高くならないように preservesPitch（と webkit・moz の名前）を立てる。実機で声が高くならないかは【未実測】（実機の試験待ち）
 let rateFix = 0, rateFixT = null;
 function applyRate() {
@@ -419,27 +432,32 @@ au.addEventListener("ratechange", () => {
   clearTimeout(rateFixT); rateFixT = setTimeout(() => { rateFix = 0; }, 1000);
   applyRate();
 });
-// 速さのバー（0.9〜2.0・0.1 刻み）。目盛りと今の値だけを大きく（つまみ 34px・今の値 30px・動かしている間は指の上に値の吹き出し）。
-// 目盛りの字はつまみの中心と同じ位置に並べる（左右の余白＝つまみの半分）。1.0 の下に「入試」の印。
-const rateP = r => (r - RATES[0]) / (RATES[RATES.length - 1] - RATES[0]);
+// 速さのバー（表示で 0.7〜1.5・0.1 刻み）。目盛りと今の値だけを大きく（つまみ 34px・今の値 30px・動かしている間は指の上に値の吹き出し）。
+// 目盛りの字はつまみの中心と同じ位置に並べる（左右の余白＝つまみの半分）。「入試」の印は付けない（上の RATE_BASE の注）。
+const rateP = r => Math.min(1, Math.max(0, (toDisp(r) - DISP[0]) / (DISP[DISP.length - 1] - DISP[0])));
+const onTick = (x, r) => Math.abs(x - toDisp(r)) < 0.005;
+// 目盛りに乗らない前の値（実際 1.5＝表示 1.15 など）は、つまみの位置だけ近い目盛りに置く（寄る向きをブラウザ任せにしない・塗りもつまみに合わせる）。
+// 保存の値は動かすまで変えない＝描いたときの value を data-v0 に残し、value がそれと同じあいだは onRateInput で書かない
+// （動かさずに触って離したときに change を出す端末でも、寄った値で上書きしない）。
 function vRatePanel() {
-  const r = curRate();
-  return `<div class="rateui" style="--p:${rateP(r)}">
+  const r = curRate(), v = snapDisp(toDisp(r)), p = (v - DISP[0]) / (DISP[DISP.length - 1] - DISP[0]);
+  return `<div class="rateui" style="--p:${p}">
     <div class="rateval num"><b class="rateNow">${fmtRate(r)}</b><span>倍</span></div>
     <div class="rangewrap"><span class="bubble num" aria-hidden="true">${fmtRate(r)}</span>
-      <input type="range" class="rate" data-rate min="${RATES[0]}" max="${RATES[RATES.length - 1]}" step="0.1" value="${r}" aria-label="再生の速さ" aria-valuetext="${fmtRate(r)}倍">
-      <div class="ticks num" aria-hidden="true">${RATES.map(x => `<span class="${x === r ? "on" : ""}${x === 1 ? " std" : ""}" data-r="${x}">${fmtRate(x)}</span>`).join("")}</div></div>
+      <input type="range" class="rate" data-rate data-v0="${v}" min="${DISP[0]}" max="${DISP[DISP.length - 1]}" step="0.1" value="${v}" aria-label="再生の速さ" aria-valuetext="${fmtRate(r)}倍">
+      <div class="ticks num" aria-hidden="true">${DISP.map(x => `<span class="${onTick(x, r) ? "on" : ""}" data-r="${x}">${x.toFixed(1)}</span>`).join("")}</div></div>
     <p class="small" style="margin:0">${esc(TXT.rateNote)}</p></div>`;
 }
 // バーを動かしている間＝描き直さずに、その場で値・目盛り・右下のボタンを塗り替え、鳴っている音にもすぐ効かせる
 function onRateInput(el, done) {
-  const r = snapRate(+el.value);
+  if (el.dataset.v0 !== undefined) { if (+el.value === +el.dataset.v0) return; delete el.dataset.v0; }
+  const r = toReal(snapDisp(+el.value));
   S.settings.rate = r; S.settings.rateMine = true; rateFix = 0; applyRate();
   const ui = el.closest(".rateui");
   if (ui) {
     ui.style.setProperty("--p", rateP(r));
     ui.querySelectorAll(".rateNow, .bubble").forEach(x => { x.textContent = fmtRate(r); });
-    ui.querySelectorAll(".ticks span").forEach(x => x.classList.toggle("on", +x.dataset.r === r));
+    ui.querySelectorAll(".ticks span").forEach(x => x.classList.toggle("on", onTick(+x.dataset.r, r)));
     ui.classList.toggle("drag", !done);
   }
   el.setAttribute("aria-valuetext", fmtRate(r) + "倍");
@@ -1084,7 +1102,7 @@ function vQBlock(it, q, st) {
     const r = qResult(it, q, st);
     const keys = q.blanks.map((_, k) => qi + "-" + k);
     const anyNg = keys.some(k => !(st.grade[k] || {}).ok);
-    tail = `<div class="verdict ${r.pt ? "ok" : "ng"}">${r.pt ? "正解（2点）" : r.half ? "片方正解（このアプリでは0点・本番は学校により部分点があるかも）" : st.paper ? "自己採点してください" : "照合で合わない（模範解答を見て自己採点できます）"}${st.self[qi] != null ? "・自己採点" : ""}</div>`;
+    tail = `<div class="verdict ${r.pt ? "ok" : "ng"}">${r.pt ? "正解（2点）" : r.half ? "片方正解（このアプリでは0点）" : st.paper ? "自己採点してください" : "照合で合わない（模範解答を見て自己採点できます）"}${st.self[qi] != null ? "・自己採点" : ""}</div>`;
     if (!st.paper) tail += `<div class="model">模範解答：${q.blanks.map(b => `<b>${esc(b.answer)}</b>`).join(" ／ ")}${keys.map(k => st.grade[k] && st.grade[k].near ? `<br>綴りが近い：<b>${esc(st.inputs[k])}</b>（ここが違う）` : "").join("")}</div>`;
     if (anyNg || st.paper) tail += `<div class="self"><span class="sub">模範解答と同じ意味なら：</span><button class="btn sm${st.self[qi] === true ? " pri" : ""}" data-act="self" data-q="${qi}" data-v="1">合っていた</button><button class="btn sm${st.self[qi] === false ? " pri" : ""}" data-act="self" data-q="${qi}" data-v="0">違っていた</button></div>`;
   }
@@ -1431,7 +1449,7 @@ const ACT = {
   rate() { rateOpen = !rateOpen; mountPlayer(vPlayer()); paintPlayer(); },
   // 速さを選ぶ＝端末に保存（次に開いても続く）・鳴っている音にもすぐ効かせる
   setRate(d) {
-    const r = +d.r; if (!RATES.includes(r)) return;
+    const x = +d.r; if (!DISP.includes(x)) return; const r = toReal(x);   // d.r は表示の値
     S.settings.rate = r; S.settings.rateMine = true; save(true); rateFix = 0; applyRate();
     if (hasPlayer()) { mountPlayer(vPlayer()); paintPlayer(); } else render();
   },

@@ -149,7 +149,6 @@ h2{font-size:17px;margin:0;font-weight:700}
 .ticks{display:flex;justify-content:space-between;padding:0 calc(var(--th)/2);font-size:12.5px;color:var(--sub);height:34px}
 .ticks span{width:0;display:flex;flex-direction:column;align-items:center;white-space:nowrap;transition:color .12s,font-size .12s}
 .ticks span.on{color:var(--ac);font-weight:800;font-size:15px}
-.ticks span.std::after{content:"入試";font:600 10px var(--f);color:var(--sub);margin-top:1px}
 .bubble{position:absolute;top:-30px;left:calc(var(--th)/2 + var(--p)*(100% - var(--th)));transform:translateX(-50%) scale(.6);opacity:0;pointer-events:none;background:var(--ac);color:var(--ac-ink);font-weight:800;font-size:20px;line-height:1;padding:7px 10px;border-radius:12px;transition:opacity .12s,transform .12s;transform-origin:50% 100%}
 .rateui.drag .bubble{opacity:1;transform:translateX(-50%) scale(1)}
 .decide{display:flex;gap:10px}
