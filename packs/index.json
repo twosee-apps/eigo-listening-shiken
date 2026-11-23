@@ -3,10 +3,10 @@
   {
    "id": "shizuoka",
    "name": "静岡県 公立高校入試 大問1（放送）",
-   "version": "p-c54016d2bcc4",
+   "version": "p-460df7e72b87",
    "path": "packs/shizuoka/pack.json",
    "audio": 150,
-   "bytes": 26738211
+   "bytes": 26739137
   }
  ]
 }
